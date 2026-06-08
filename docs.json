@@ -53,7 +53,8 @@
               {
                 "group": "Angular",
                 "pages": [
-                  "frameworks/angular/angular-ec2-deployment.mdx"
+                  "frameworks/angular/angular-ec2-deployment.mdx",
+                  "frameworks/angular/github-actions-cicd.mdx"
                 ]
               }
             ]

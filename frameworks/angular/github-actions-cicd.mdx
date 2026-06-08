@@ -1,0 +1,107 @@
+---
+title: "GitHub Actions CI/CD"
+sidebarTitle: "GitHub Actions CI/CD"
+description: "Automate Angular app deployment to AWS EC2 + Nginx using GitHub Actions. Push to main and your site updates automatically."
+---
+
+Same concept as React, just a few Angular-specific changes. Here's exactly what to do.
+
+## Step 1 — Add GitHub Secrets
+
+Repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+
+| Secret name | Value |
+| --- | --- |
+| `EC2_HOST` | Your EC2 public IP |
+| `EC2_USER` | `ubuntu` |
+| `EC2_SSH_KEY` | Full contents of your `.pem` file |
+| `EC2_TARGET_DIR` | `/var/www/angular-app` |
+
+## Step 2 — Create the workflow file
+
+In your Angular project root, create `.github/workflows/deploy.yml`:
+
+```yaml
+name: Deploy Angular to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Angular app
+        run: npx ng build --configuration production
+
+      - name: Copy build files to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: 'dist/<your-app-name>/browser/*'   # Angular 17+
+          target: '/home/ubuntu/deploy-tmp'
+          strip_components: 3   # strips dist/<app-name>/browser/
+
+      - name: Move files and reload Nginx
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            sudo rm -rf ${{ secrets.EC2_TARGET_DIR }}/*
+            sudo cp -r /home/ubuntu/deploy-tmp/* ${{ secrets.EC2_TARGET_DIR }}/
+            sudo chown -R www-data:www-data ${{ secrets.EC2_TARGET_DIR }}
+            rm -rf /home/ubuntu/deploy-tmp
+            sudo nginx -t && sudo systemctl reload nginx
+```
+
+<Warning>
+  Replace `<your-app-name>` in the `source` field with your actual app name from `angular.json` → `projects` key. Run `cat angular.json | grep '"name"'` to check.
+</Warning>
+
+## Step 3 — The only difference vs React
+
+|  | React | Angular |
+| --- | --- | --- |
+| Build command | `npm run build` | `npx ng build --configuration production` |
+| Output folder | `build/` | `dist/<app-name>/browser/` |
+| `strip_components` | `1` | `3` (strips `dist/<name>/browser/`) |
+
+Everything else — secrets, SSH, Nginx reload — is identical.
+
+## Step 4 — Push and watch it run
+
+```bash
+git add .github/workflows/deploy.yml
+git commit -m "add Angular CI/CD pipeline"
+git push origin main
+```
+
+Go to repo → **Actions** tab — you'll see it build and deploy live. Green checkmark = site updated automatically from now on.
+
+## Rollback if something breaks
+
+```bash
+git revert HEAD
+git push origin main
+```
+
+GitHub Actions will re-run and redeploy the previous working version automatically.
