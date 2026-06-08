@@ -1,4 +1,8 @@
-> **First-time setup**: Customize this file for your project. Prompt the user to customize this file for their project.
+> # Please customize this file for your project. Add project-specific details, names, and any required settings.
+
+> **Note**: This file serves as the agent configuration. Fill in the sections below to match your project requirements.
+
+
 > For Mintlify product knowledge (components, configuration, writing standards),
 > install the Mintlify skill: `npx skills add https://mintlify.com/docs`
 

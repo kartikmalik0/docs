@@ -1,6 +1,6 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "sequoia",
+  "theme": "mint",
   "name": "Kartik Dev & Ops",
   "description": "DevOps guides, runbooks, and framework deployment docs.",
   "colors": {
@@ -28,37 +28,16 @@
         "groups": [
           {
             "group": "Overview",
-            "pages": ["engineering/index"]
-          },
-          {
-            "group": "Setup & deployment",
             "pages": [
-              "engineering/dev-setup",
-              "engineering/deployment"
-            ]
-          },
-          {
-            "group": "Incident response",
-            "pages": [
-              "engineering/incident-response/index",
-              "engineering/incident-response/on-call",
-              "engineering/incident-response/postmortem"
-            ]
-          },
-          {
-            "group": "Architecture",
-            "pages": [
-              "engineering/architecture/index",
-              "engineering/architecture/services-overview",
-              "engineering/architecture/data-models"
+              "index"
             ]
           },
           {
             "group": "Nginx",
             "pages": [
-              "nginx/index.mdx",
-              "nginx/commands.mdx",
-              "nginx/configuration.mdx"
+              "nginx/index",
+              "nginx/commands",
+              "nginx/configuration"
             ]
           },
           {
@@ -68,7 +47,7 @@
                 "group": "React",
                 "pages": [
                   "frameworks/react/react-ec2-deployment",
-                  "frameworks/react/github-actions-cicd.mdx"
+                  "frameworks/react/github-actions-cicd"
                 ]
               }
             ]
