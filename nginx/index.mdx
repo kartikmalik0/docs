@@ -1,0 +1,32 @@
+---
+title: "Overview"
+sidebarTitle: "Overview"
+description: "Introduction to Nginx, common use cases, and where to find configuration files."
+url: "nginx/index"
+---
+
+## What is Nginx?
+
+Nginx is a high-performance HTTP server, reverse proxy, and load balancer. It's commonly used to:
+
+- Serve static websites and assets
+- Reverse proxy traffic to application servers (Node.js, Python, Go, etc.)
+- Terminate TLS/SSL
+- Load balance across multiple backends
+- Cache responses
+
+## Key file locations
+
+| Path | Purpose |
+| --- | --- |
+| `/etc/nginx/nginx.conf` | Main configuration file |
+| `/etc/nginx/sites-available/` | Available site configs (Debian/Ubuntu) |
+| `/etc/nginx/sites-enabled/` | Enabled site configs (symlinks) |
+| `/etc/nginx/conf.d/` | Drop-in configs (RHEL/CentOS) |
+| `/var/log/nginx/access.log` | Access logs |
+| `/var/log/nginx/error.log` | Error logs |
+
+## Next steps
+
+- [Basic commands](/nginx/commands) — start, stop, reload, and check status
+- [Configuration basics](/nginx/configuration) — server blocks and reverse proxying

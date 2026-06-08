@@ -1,0 +1,128 @@
+---
+title: "GitHub Actions CI/CD"
+sidebarTitle: "GitHub Actions CI/CD"
+description: "Automate React app deployment to AWS EC2 + Nginx using GitHub Actions. Push to main and your site updates automatically."
+url: "frameworks/react/github-actions-cicd"
+---
+
+This guide builds on [Deploy to EC2 \+ Nginx](/frameworks/react/react-ec2-deployment) and replaces manual `scp` \+ `ssh` steps with a CI/CD pipeline.
+
+## Flow
+
+```text
+Push to GitHub
+      ↓
+GitHub Actions builds React app
+      ↓
+SSH into EC2
+      ↓
+Deploy automatically
+```
+
+## Step 1 — Add secrets to GitHub
+
+Go to your repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**.
+
+Add these 4 secrets:
+
+| Secret name | Value |
+| --- | --- |
+| `EC2_HOST` | Your EC2 public IP, e.g. `13.60.19.93` |
+| `EC2_USER` | `ubuntu` |
+| `EC2_SSH_KEY` | Contents of your `.pem` file (the whole thing, including `-----BEGIN`) |
+| `EC2_TARGET_DIR` | `/var/www/react-app` |
+
+<Warning>
+  Paste the **entire** private key including the `-----BEGIN ...-----` and `-----END ...-----` lines and the trailing newline. Missing characters will cause SSH auth failures.
+</Warning>
+
+## Step 2 — Create the workflow file
+
+In your project root, create `.github/workflows/deploy.yml`:
+
+```yaml
+name: Deploy React to EC2
+
+on:
+  push:
+    branches:
+      - main   # change to master if that's your default branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build React app
+        run: npm run build
+
+      - name: Copy build files to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: 'build/*'
+          target: '/home/ubuntu/deploy-tmp'
+          strip_components: 1   # removes the 'build/' prefix
+
+      - name: Move files and reload Nginx
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            sudo rm -rf ${{ secrets.EC2_TARGET_DIR }}/*
+            sudo cp -r /home/ubuntu/deploy-tmp/* ${{ secrets.EC2_TARGET_DIR }}/
+            sudo chown -R www-data:www-data ${{ secrets.EC2_TARGET_DIR }}
+            rm -rf /home/ubuntu/deploy-tmp
+            sudo nginx -t && sudo systemctl reload nginx
+```
+
+## Step 3 — Push and test
+
+```bash
+git add .github/workflows/deploy.yml
+git commit -m "add CI/CD deployment workflow"
+git push origin main
+```
+
+Then go to your GitHub repo → **Actions** tab to watch it run live. A green checkmark means your site is updated.
+
+## Things to know
+
+<AccordionGroup>
+  <Accordion title="npm ci vs npm install">
+    `npm ci` is faster and stricter — it uses `package-lock.json` exactly as-is, which is what you want in automation.
+  </Accordion>
+
+  <Accordion title="nginx -t before reload">
+    The workflow tests the Nginx config before reloading, so a bad config won't take your site down silently.
+  </Accordion>
+
+  <Accordion title="Rollback">
+    If a deploy breaks your site, revert the commit and push again:
+
+    ```bash
+    git revert HEAD
+    git push origin main
+    ```
+  </Accordion>
+
+  <Accordion title="Branch protection tip">
+    If you want deploys only on tested code, add a test step before the deploy job, or protect `main` so PRs are required before merging.
+  </Accordion>
+</AccordionGroup>

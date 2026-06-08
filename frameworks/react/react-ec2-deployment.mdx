@@ -1,0 +1,447 @@
+---
+title: "React Application Deployment on AWS EC2 with Nginx"
+sidebarTitle: "Deploy to EC2 + Nginx"
+description: "Step-by-step guide to deploying a React application on an AWS EC2 instance behind Nginx, with a custom subdomain, HTTPS, and production hardening."
+url: "frameworks/react/react-ec2-deployment"
+---
+
+## Architecture
+
+```text
+User Browser
+      ↓
+react.vnta.agency
+      ↓
+DNS Record (A Record)
+      ↓
+AWS EC2 Public IP
+      ↓
+Nginx Web Server
+      ↓
+React Build Files
+```
+
+## 1. Launch EC2 instance
+
+**Purpose:** EC2 is the Linux server that hosts the React application.
+
+**Configuration:**
+
+- OS: Ubuntu 24.04 LTS
+- Instance type: `t3.micro` (learning / small projects)
+- Key pair: `.pem` file
+- Public IP enabled
+
+## 2. Configure security group
+
+Security Groups act as a firewall for the EC2 instance.
+
+**Inbound rules:**
+
+| Type | Port | Purpose |
+| --- | --- | --- |
+| SSH | 22 | Remote server access |
+| HTTP | 80 | Website traffic |
+| HTTPS | 443 | Secure website traffic |
+
+**Why:**
+
+- Without port `22` — cannot SSH into the server
+- Without port `80` — website won't load over HTTP
+- Without port `443` — HTTPS won't work
+
+<Warning>
+  Don't open unnecessary ports (`3000`, `5000`, `8000`, `8080`). Only expose what you actually need.
+</Warning>
+
+## 3. Connect to EC2
+
+```bash
+ssh -i mykey.pem ubuntu@EC2_PUBLIC_IP
+```
+
+- `ssh` — Secure Shell. Encrypted connection to the server.
+- `-i mykey.pem` — use the AWS private key for authentication.
+- `ubuntu` — default Ubuntu user.
+- `EC2_PUBLIC_IP` — server address.
+
+## 4. Update the server
+
+```bash
+sudo apt update
+sudo apt upgrade -y
+```
+
+Updates package repository info and installs the latest security patches.
+
+## 5. Install Nginx
+
+```bash
+sudo apt install nginx -y
+```
+
+Nginx serves the React build files.
+
+```text
+Linux Server → Nginx → Website Available
+```
+
+## 6. Verify Nginx
+
+```bash
+systemctl status nginx
+```
+
+Expected: `active (running)`
+
+Open `http://EC2_PUBLIC_IP` — you should see **Welcome to nginx**.
+
+## 7. Enable Nginx on boot
+
+```bash
+sudo systemctl enable nginx
+```
+
+Ensures Nginx starts automatically if the server restarts.
+
+## 8. Build the React application
+
+On your local machine:
+
+```bash
+npm install
+npm run build
+```
+
+Output:
+
+```text
+build/
+├── index.html
+├── static
+└── assets
+```
+
+Browsers can't run `.jsx`, `.tsx`, or Tailwind source directly. The build converts everything into plain HTML, CSS, and JavaScript.
+
+## 9. Create the website directory
+
+On EC2:
+
+```bash
+sudo mkdir -p /var/www/react-app
+```
+
+By Linux convention, `/var/www` is used for web applications.
+
+## 10. Transfer the React build
+
+From your local machine:
+
+```bash
+scp -i mykey.pem -r build/* ubuntu@EC2_PUBLIC_IP:/home/ubuntu/
+```
+
+- `scp` — Secure Copy. Transfers files over SSH.
+- `-r` — recursive copy.
+
+## 11. Move build files into place
+
+SSH back into the server:
+
+```bash
+ssh -i mykey.pem ubuntu@EC2_PUBLIC_IP
+```
+
+Move files:
+
+```bash
+sudo cp -r /home/ubuntu/* /var/www/react-app/
+```
+
+Verify:
+
+```bash
+ls /var/www/react-app
+# index.html  static
+```
+
+## 12. Configure Nginx
+
+```bash
+sudo nano /etc/nginx/sites-available/default
+```
+
+Replace contents with:
+
+```nginx
+server {
+    listen 80;
+
+    root /var/www/react-app;
+    index index.html;
+
+    location / {
+        try_files $uri /index.html;
+    }
+}
+```
+
+## 13. Understanding the Nginx config
+
+**`listen 80;`** — Nginx listens for HTTP traffic on port 80.
+
+**`root /var/www/react-app;`** — Location of website files.
+
+**`index index.html;`** — Homepage file.
+
+**`try_files $uri /index.html;`** — Critical for React Router.
+
+Without it, paths like `/about`, `/dashboard`, `/contact` return `404 Not Found`. With it, React handles client-side routing.
+
+## 14. Test the Nginx configuration
+
+```bash
+sudo nginx -t
+```
+
+Expected:
+
+```text
+syntax is ok
+test is successful
+```
+
+Always test before reloading — invalid config can crash Nginx.
+
+## 15. Restart Nginx
+
+```bash
+sudo systemctl restart nginx
+```
+
+Visit `http://EC2_PUBLIC_IP` — the React app should load.
+
+## 16. Configure the subdomain
+
+Target: `react.vnta.agency`
+
+In your DNS provider (Vercel DNS, Cloudflare, Namecheap, Route53), create:
+
+| Type | Name | Value |
+| --- | --- | --- |
+| A | react | EC2\_PUBLIC\_IP |
+
+Example:
+
+| Type | Name | Value |
+| --- | --- | --- |
+| A | react | 13.60.19.93 |
+
+Result: `react.vnta.agency → 13.60.19.93`
+
+## 17. Verify DNS
+
+```bash
+dig react.vnta.agency
+# or
+nslookup react.vnta.agency
+```
+
+Expected output should include `13.60.19.93`.
+
+## 18. Configure Nginx for the domain
+
+```bash
+sudo nano /etc/nginx/sites-available/default
+```
+
+```nginx
+server {
+    listen 80;
+    server_name react.vnta.agency;
+
+    root /var/www/react-app;
+    index index.html;
+
+    location / {
+        try_files $uri /index.html;
+    }
+}
+```
+
+## 19. Install an SSL certificate
+
+Install Certbot:
+
+```bash
+sudo apt install certbot python3-certbot-nginx -y
+```
+
+Generate the certificate:
+
+```bash
+sudo certbot --nginx -d react.vnta.agency
+```
+
+Certbot automatically:
+
+- Validates domain ownership
+- Creates the SSL certificate
+- Updates the Nginx configuration
+- Enables HTTPS redirect
+
+## 20. Verify HTTPS
+
+Visit `https://react.vnta.agency` — you should see the 🔒 secure indicator.
+
+## 21. SSL auto-renewal
+
+Check the timer:
+
+```bash
+sudo systemctl status certbot.timer
+```
+
+Test renewal:
+
+```bash
+sudo certbot renew --dry-run
+```
+
+Let's Encrypt certificates expire every 90 days, so auto-renewal is essential.
+
+## 22. Security headers
+
+Add inside the `server` block:
+
+```nginx
+add_header X-Frame-Options SAMEORIGIN always;
+add_header X-Content-Type-Options nosniff always;
+add_header Referrer-Policy strict-origin always;
+```
+
+- **`X-Frame-Options: SAMEORIGIN`** — prevents clickjacking.
+- **`X-Content-Type-Options: nosniff`** — prevents MIME type guessing.
+- **`Referrer-Policy: strict-origin`** — improves privacy.
+
+## 23. Enable compression
+
+```nginx
+gzip on;
+gzip_types
+    text/plain
+    text/css
+    application/json
+    application/javascript
+    text/xml
+    application/xml;
+```
+
+Reduces file sizes (e.g. `1 MB JS → ~200 KB`) for faster loads.
+
+## 24. Browser caching
+
+```nginx
+location /static/ {
+    expires 1y;
+    add_header Cache-Control "public";
+}
+```
+
+Prevents re-downloading unchanged assets.
+
+## 25. Log monitoring
+
+Access logs:
+
+```bash
+sudo tail -f /var/log/nginx/access.log
+```
+
+Shows visitors, pages requested, and IP addresses.
+
+Error logs:
+
+```bash
+sudo tail -f /var/log/nginx/error.log
+```
+
+Shows configuration issues, missing files, and permission problems.
+
+## 26. Common troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Website not loading">
+    ```bash
+    sudo systemctl status nginx
+    sudo systemctl restart nginx
+    ```
+  </Accordion>
+
+  <Accordion title="Nginx config error">
+    ```bash
+    sudo nginx -t
+    ```
+  </Accordion>
+
+  <Accordion title="Domain not working">
+    ```bash
+    dig react.vnta.agency
+    ```
+
+    Verify the DNS A record.
+  </Accordion>
+
+  <Accordion title="SSL fails">
+    Verify the domain points to the EC2 IP and port 80 is open, then retry:
+
+    ```bash
+    sudo certbot --nginx -d react.vnta.agency
+    ```
+  </Accordion>
+
+  <Accordion title="Permission problems">
+    ```bash
+    ls -la /var/www/react-app
+    sudo chown -R www-data:www-data /var/www/react-app
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Useful daily commands
+
+```bash
+systemctl status nginx
+systemctl restart nginx
+systemctl reload nginx
+nginx -t
+df -h
+free -h
+top
+htop
+ss -tulpn
+journalctl -u nginx
+tail -f /var/log/nginx/error.log
+```
+
+## Final production checklist
+
+- EC2 created
+- Security groups configured
+- Nginx installed
+- React build generated
+- Files uploaded
+- Nginx configured
+- React Router configured (`try_files`)
+- DNS A record added
+- SSL installed
+- HTTPS enabled
+- Security headers added
+- Gzip enabled
+- Browser cache enabled
+- Logs monitored
+- Auto SSL renewal working
+- Nginx starts on boot
+
+At this point the React application is running on AWS EC2 behind Nginx with a custom subdomain, HTTPS, basic security hardening, compression, caching, and monitoring support.

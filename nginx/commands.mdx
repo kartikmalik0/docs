@@ -1,0 +1,89 @@
+---
+title: "Commands"
+sidebarTitle: "Commands"
+description: "Common Nginx commands for starting, stopping, reloading, and troubleshooting."
+url: "nginx/commands"
+---
+
+## Service control
+
+Use `systemctl` to manage the Nginx service on most Linux distros.
+
+```bash
+# Start Nginx
+sudo systemctl start nginx
+
+# Stop Nginx
+sudo systemctl stop nginx
+
+# Restart (full stop + start)
+sudo systemctl restart nginx
+
+# Reload config without dropping connections
+sudo systemctl reload nginx
+
+# Check status
+sudo systemctl status nginx
+
+# Enable Nginx to start on boot
+sudo systemctl enable nginx
+```
+
+## Configuration management
+
+```bash
+# Test the configuration for syntax errors
+sudo nginx -t
+
+# Test and print the full parsed config
+sudo nginx -T
+
+# Reload config (alternative to systemctl reload)
+sudo nginx -s reload
+
+# Stop gracefully (finish current requests)
+sudo nginx -s quit
+
+# Stop immediately
+sudo nginx -s stop
+
+# Reopen log files (useful after log rotation)
+sudo nginx -s reopen
+```
+
+## Version and build info
+
+```bash
+# Show Nginx version
+nginx -v
+
+# Show version + compile flags
+nginx -V
+```
+
+## Logs
+
+```bash
+# Tail the access log
+sudo tail -f /var/log/nginx/access.log
+
+# Tail the error log
+sudo tail -f /var/log/nginx/error.log
+```
+
+## Quick troubleshooting
+
+<Steps>
+  <Step title="Test the config">
+    Always run `sudo nginx -t` before reloading. Fix any reported errors first.
+  </Step>
+  <Step title="Check the service status">
+    Run `sudo systemctl status nginx` to see if the process is running and view recent logs.
+  </Step>
+  <Step title="Inspect the error log">
+    Tail `/var/log/nginx/error.log` while reproducing the issue.
+  </Step>
+  <Step title="Verify the port is listening">
+    Run `sudo ss -ltnp | grep nginx` to confirm Nginx is bound to the expected port.
+  </Step>
+</Steps>
