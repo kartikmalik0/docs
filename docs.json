@@ -49,6 +49,12 @@
                   "frameworks/react/react-ec2-deployment",
                   "frameworks/react/github-actions-cicd"
                 ]
+              },
+              {
+                "group": "Angular",
+                "pages": [
+                  "frameworks/angular/angular-ec2-deployment.mdx"
+                ]
               }
             ]
           }

@@ -1,0 +1,336 @@
+---
+title: "Angular App Deployment on AWS EC2 with Nginx"
+sidebarTitle: "Deploy to EC2 + Nginx"
+description: "Deploy an Angular app on AWS EC2 behind Nginx with a custom domain, HTTPS, and production setup."
+---
+
+## Architecture
+
+```text
+User Browser
+      ↓
+angular.kartikmalik.me
+      ↓
+DNS A Record → EC2 Public IP
+      ↓
+Nginx (routes by domain)
+      ↓
+/var/www/angular-app
+```
+
+## Step 1 — Build Angular locally
+
+On your local machine:
+
+```bash
+npm install
+ng build --configuration production
+```
+
+Output will be in one of these depending on your Angular version:
+
+```text
+dist/<your-app-name>/browser/   ← Angular 17+
+dist/<your-app-name>/           ← Angular 15/16
+```
+
+Check your exact output folder:
+
+```bash
+ls dist/
+ls dist/<your-app-name>/
+```
+
+## Step 2 — SSH into EC2
+
+```bash
+ssh -i mykey.pem ubuntu@EC2_PUBLIC_IP
+```
+
+## Step 3 — Update the server
+
+```bash
+sudo apt update
+sudo apt upgrade -y
+```
+
+## Step 4 — Install Nginx (skip if already installed)
+
+```bash
+sudo apt install nginx -y
+sudo systemctl enable nginx
+sudo systemctl start nginx
+```
+
+Verify it's running:
+
+```bash
+systemctl status nginx
+# Expected: active (running)
+```
+
+## Step 5 — Create the website directory
+
+```bash
+sudo mkdir -p /var/www/angular-app
+```
+
+Give your `ubuntu` user ownership so you can upload directly:
+
+```bash
+sudo chown -R ubuntu:ubuntu /var/www/angular-app
+```
+
+## Step 6 — Upload Angular build directly to EC2
+
+From your local machine (no intermediate step needed):
+
+```bash
+# Angular 17+
+scp -i mykey.pem -r dist/<your-app-name>/browser/* ubuntu@EC2_PUBLIC_IP:/var/www/angular-app/
+
+# Angular 15/16
+scp -i mykey.pem -r dist/<your-app-name>/* ubuntu@EC2_PUBLIC_IP:/var/www/angular-app/
+```
+
+Verify files are there on EC2:
+
+```bash
+ls /var/www/angular-app
+# You should see index.html here
+```
+
+## Step 7 — Create the Nginx config
+
+```bash
+sudo nano /etc/nginx/sites-available/angular-app
+```
+
+Paste this:
+
+```nginx
+server {
+    listen 80;
+    server_name angular.kartikmalik.me;
+
+    root /var/www/angular-app;
+    index index.html;
+
+    # Required for Angular Router
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Cache hashed assets forever
+    location ~* \.(js|css|woff2?|png|jpg|svg|ico)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    # Security headers
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin always;
+
+    # Gzip compression
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml;
+}
+```
+
+## Step 8 — Enable the config
+
+This is the step most people forget. Nginx only reads from `sites-enabled/`, so you must create a symlink:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/angular-app /etc/nginx/sites-enabled/
+```
+
+## Step 9 — Test and reload Nginx
+
+Always test before reloading — a bad config can crash Nginx:
+
+```bash
+sudo nginx -t
+# Expected: syntax is ok / test is successful
+
+sudo systemctl reload nginx
+```
+
+## Step 10 — Add the DNS A record
+
+In your DNS provider (Namecheap, Cloudflare, etc.), add:
+
+| Type | Name | Value |
+| --- | --- | --- |
+| A | angular | YOUR\_EC2\_PUBLIC\_IP |
+
+Example:
+
+| Type | Name | Value |
+| --- | --- | --- |
+| A | angular | 13.60.19.93 |
+
+Verify DNS is working:
+
+```bash
+dig angular.kartikmalik.me
+# Should return your EC2 IP
+```
+
+<Note>
+  DNS can take 5–30 minutes to propagate.
+</Note>
+
+## Step 11 — Install SSL (HTTPS)
+
+```bash
+sudo apt install certbot python3-certbot-nginx -y
+sudo certbot --nginx -d angular.kartikmalik.me
+```
+
+Certbot will automatically:
+
+- Validate your domain
+- Install the SSL certificate
+- Update Nginx config
+- Enable HTTPS redirect
+
+Verify:
+
+```text
+https://angular.kartikmalik.me
+# Should show the lock icon
+```
+
+## Step 12 — Fix permissions (if you see 403 errors)
+
+```bash
+sudo chown -R www-data:www-data /var/www/angular-app
+sudo chmod -R 755 /var/www/angular-app
+```
+
+## Redeploying (future updates)
+
+When you push new code, you only need to rebuild and re-upload. No Nginx changes needed:
+
+```bash
+# 1. Build locally
+ng build --configuration production
+
+# 2. Upload directly (Angular 17+)
+scp -i mykey.pem -r dist/<your-app-name>/browser/* ubuntu@EC2_PUBLIC_IP:/var/www/angular-app/
+```
+
+That's it. Nginx keeps serving automatically.
+
+## `sites-available` vs `sites-enabled` explained
+
+```text
+/etc/nginx/
+├── sites-available/   ← Where you CREATE configs (all of them)
+└── sites-enabled/     ← Where Nginx READS configs (only active ones)
+```
+
+`sites-enabled` holds symlinks (shortcuts) pointing to `sites-available`. This lets you disable a site without deleting its config:
+
+```bash
+# Disable a site
+sudo rm /etc/nginx/sites-enabled/angular-app
+
+# Re-enable later
+sudo ln -s /etc/nginx/sites-available/angular-app /etc/nginx/sites-enabled/
+```
+
+## Adding more apps to the same server
+
+Every new app follows the exact same pattern:
+
+| Step | Action |
+| --- | --- |
+| 1 | Create a new directory `/var/www/new-app` |
+| 2 | Upload build files |
+| 3 | Create `/etc/nginx/sites-available/new-app` with its own `server_name` |
+| 4 | Enable with `ln -s` |
+| 5 | Add DNS A record for new domain |
+| 6 | Run `certbot --nginx -d new-domain.com` |
+
+Nginx routes by `server_name` (domain), so multiple apps never interfere with each other on the same IP.
+
+## Useful daily commands
+
+```bash
+# Check Nginx status
+systemctl status nginx
+
+# Test config before applying
+sudo nginx -t
+
+# Reload after config changes (zero downtime)
+sudo systemctl reload nginx
+
+# Watch error logs live
+sudo tail -f /var/log/nginx/error.log
+
+# Watch access logs live
+sudo tail -f /var/log/nginx/access.log
+
+# Check SSL certificates
+sudo certbot certificates
+
+# Check disk space
+df -h
+```
+
+## Troubleshooting
+
+### 404 Not Found
+
+```bash
+ls /var/www/angular-app        # check index.html is here
+sudo cat /etc/nginx/sites-enabled/angular-app  # check symlink exists
+```
+
+### Nginx config error
+
+```bash
+sudo nginx -t                  # shows exact error line
+```
+
+### Domain not loading
+
+```bash
+dig angular.kartikmalik.me     # check DNS points to your EC2 IP
+```
+
+### SSL fails
+
+```bash
+# Make sure port 80 is open in EC2 security group, then retry:
+sudo certbot --nginx -d angular.kartikmalik.me
+```
+
+### 403 Forbidden
+
+```bash
+sudo chown -R www-data:www-data /var/www/angular-app
+sudo chmod -R 755 /var/www/angular-app
+```
+
+## Production checklist
+
+- EC2 instance running
+- Security group: ports 22, 80, 443 open
+- Nginx installed and enabled on boot
+- Angular production build generated
+- Files uploaded to `/var/www/angular-app`
+- `index.html` visible in that folder
+- Nginx config created in `sites-available`
+- Config symlinked to `sites-enabled`
+- `nginx -t` passes
+- Nginx reloaded
+- DNS A record added
+- SSL certificate installed
+- HTTPS working with lock icon
+- Angular Router working (no 404 on refresh)
