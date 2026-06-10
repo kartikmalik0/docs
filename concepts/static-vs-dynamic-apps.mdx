@@ -1,0 +1,234 @@
+---
+title: "Static vs Dynamic Apps on EC2"
+sidebarTitle: "Static vs Dynamic Apps"
+description: "Understand the mental model behind deploying static frontends (React/Angular) vs dynamic backend servers (Go) on EC2 — and why Nginx and systemd fit in."
+icon: "book-open"
+---
+
+## The Core Mental Model
+
+Before touching any commands, internalize this fundamental difference:
+
+```text
+React / Angular  →  Dead files (HTML, CSS, JS)  →  Nginx just reads & sends them
+Go Server        →  Live process (running code)  →  Nginx forwards requests to it
+```
+
+<CardGroup cols={2}>
+  <Card title="React / Angular" icon="file">
+    Like a **PDF document** — it just sits there. You open it, done.
+  </Card>
+
+  <Card title="Go Server" icon="utensils">
+    Like a **chef in a kitchen** — actively running, waiting for orders, cooking responses dynamically.
+  </Card>
+</CardGroup>
+
+## Why React / Angular Is Simple to Deploy
+
+When you run `npm run build`, the entire app gets converted into plain, dumb files:
+
+```text
+build/
+├── index.html        ← one HTML file
+└── static/
+    ├── main.js       ← all your React code, bundled
+    └── main.css      ← all styles
+```
+
+These files have **zero intelligence**. They are just text. Nginx's only job is:
+
+1. Browser asks: `GET /index.html`
+2. Nginx checks: `/var/www/react-app/index.html` — exists? yes
+3. Nginx replies: here it is, bye.
+
+No process is running. No computation happens on the server. The browser downloads the files and **React runs inside the user's browser**, not on your server.
+
+```text
+EC2 Server                          User's Browser
+──────────────────                  ──────────────────
+Nginx (just file sender)    →       React app runs HERE
+/var/www/react-app/                 JavaScript executes HERE
+index.html (dead file)              API calls happen FROM here
+```
+
+<Info>
+  This is called a **Single Page Application (SPA)**. Your server is basically a fancy USB drive serving files.
+</Info>
+
+## Why Go (Backend Server) Is Different
+
+A Go server is **live, running code** that:
+
+- Listens on a port (e.g., `8080`)
+- Accepts incoming connections
+- Executes logic (queries DB, processes data, authenticates users)
+- Sends back a response
+
+```text
+Browser asks: "GET /api/users"
+                    ↓
+Nginx receives it on port 80
+                    ↓
+Nginx forwards to Go on port 8080    ← THIS is the key difference
+                    ↓
+Go runs code:
+  - connects to database
+  - fetches users
+  - formats JSON
+                    ↓
+Go sends response back
+                    ↓
+Nginx sends it to browser
+```
+
+Go is doing **real work on the server**. It must be running 24/7 as a process, otherwise requests fail.
+
+## Why Nginx Sits in Front of Go (Reverse Proxy)
+
+"Why not just expose Go directly on port 80?" You technically can, but here's why you shouldn't.
+
+### Reason 1: Security
+
+```text
+WITHOUT Nginx:
+Internet → port 8080 → Go directly exposed
+                        ↑ dangerous, Go handles everything raw
+
+WITH Nginx:
+Internet → port 80/443 → Nginx → port 8080 → Go
+                          ↑ Nginx is battle-hardened,
+                            Go only talks to Nginx internally
+```
+
+Port `8080` stays closed to the outside world. Only Nginx (on the same machine) can talk to Go internally. Attackers can't hit your Go process directly.
+
+### Reason 2: Nginx Handles What Go Shouldn't
+
+Nginx is extremely good at:
+
+- **SSL / HTTPS termination** (so Go doesn't deal with certificates)
+- **Serving static files fast** (images, CSS)
+- **Rate limiting, compression, caching headers**
+- **Load balancing** (if you later run multiple Go instances)
+
+Go should focus on business logic, not infrastructure concerns.
+
+### Reason 3: One Server, Multiple Apps
+
+```text
+yourdomain.com/api    → Go server on :8080
+yourdomain.com/       → React files in /var/www
+yourdomain.com/docs   → Some other app on :3000
+```
+
+Nginx routes traffic to the right place. Without it, you can't cleanly run multiple things on one EC2.
+
+## Why You Need systemd for Go (But Not React)
+
+React files just sit on disk. Disk doesn't crash, doesn't need restarting.
+
+Go is a **process** (like any program you run). Processes can:
+
+- Crash due to a bug
+- Die when you close the terminal (if you just ran `./server` manually)
+- Not restart when EC2 reboots
+
+`systemd` is Linux's process manager. It solves all three:
+
+<CardGroup cols={2}>
+  <Card title="Without systemd" icon="triangle-exclamation">
+    - Close terminal → server **dies**
+    - EC2 reboots → server doesn't come back
+    - Go crashes → nobody restarts it
+  </Card>
+
+  <Card title="With systemd" icon="shield-check">
+    - Close terminal → server keeps running
+    - EC2 reboots → systemd **auto-starts** Go
+    - Go crashes → systemd restarts it (`Restart=always`)
+  </Card>
+</CardGroup>
+
+The `goapp.service` file you create is essentially telling Linux:
+
+> "This is an important program. Keep it alive always. Start it on boot. If it dies, bring it back."
+
+React has no equivalent need because there's no process — just files sitting quietly on disk.
+
+## The Full Picture: Side by Side
+
+```text
+REACT DEPLOYMENT                    GO DEPLOYMENT
+─────────────────────────────────   ─────────────────────────────────
+npm run build (local)               go build -o server (on EC2)
+      ↓                                   ↓
+Creates dead files                  Creates a binary (executable)
+      ↓                                   ↓
+scp files to EC2                    systemd runs the binary as a service
+      ↓                                   ↓
+Nginx serves files directly         Nginx proxies requests to :8080
+      ↓                                   ↓
+Browser runs React                  Go runs on SERVER, returns data
+```
+
+## Why Build the Go Binary on EC2?
+
+You might wonder — why not build locally and upload the binary?
+
+You can, but building on EC2 is safer because of **CPU architecture mismatch**:
+
+```text
+Your Mac (ARM chip)  →  builds for ARM architecture
+EC2 (x86 chip)       →  binary won't run! wrong CPU
+```
+
+If you build directly on EC2, Go automatically compiles for the right CPU. You can also cross-compile locally:
+
+```bash
+GOOS=linux GOARCH=amd64 go build -o server .
+```
+
+<Tip>
+  For beginners, building on EC2 is simpler and safer.
+</Tip>
+
+## Deployment Flow Visualized
+
+```text
+REACT                              GO
+──────────────────────────────     ──────────────────────────────
+  Local Machine                      Local Machine
+  [npm run build]                     [scp / git push code]
+       ↓                                      ↓
+  EC2 Server                          EC2 Server
+  [Nginx]                             [go build → ./server binary]
+     ↓                                        ↓
+  /var/www/react-app/              [systemd: keeps it alive]
+  (just files on disk)                        ↓
+                                    [./server listening :8080]
+                                              ↓
+                                         [Nginx :80]
+                                    proxy_pass localhost:8080
+```
+
+## Summary: The 3 Core Differences
+
+| Aspect | React / Angular | Go Server |
+| --- | --- | --- |
+| **What it is** | Dead static files | Live running process |
+| **Where logic runs** | User's browser | Your EC2 server |
+| **Nginx role** | File server | Reverse proxy |
+| **Process needed?** | No | Yes (systemd) |
+| **Crashes possible?** | No (files don't crash) | Yes (needs auto-restart) |
+| **Redeploy means** | Copy new files | Rebuild binary \+ restart service |
+| **Port exposed?** | None (files on disk) | `8080` internally only |
+
+<Note>
+  The mental shift:
+
+  - **React deployment is a storage problem** — put files in the right place.
+  - **Go deployment is a process management problem** — keep a program running reliably forever.
+
+  Nginx solves a different problem in each case: **file delivery** vs. **traffic routing**.
+</Note>

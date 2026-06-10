@@ -29,7 +29,8 @@
           {
             "group": "Overview",
             "pages": [
-              "index"
+              "index",
+              "concepts/static-vs-dynamic-apps"
             ]
           },
           {
@@ -55,6 +56,13 @@
                 "pages": [
                   "frameworks/angular/angular-ec2-deployment",
                   "frameworks/angular/github-actions-cicd"
+                ]
+              },
+              {
+                "group": "Golang",
+                "icon": "golang",
+                "pages": [
+                  "frameworks/golang/golang-ec2-deployment"
                 ]
               }
             ]

@@ -1,0 +1,591 @@
+---
+title: "Go Server Deployment on AWS EC2 with Nginx"
+sidebarTitle: "Deploy to EC2 + Nginx"
+description: "Complete guide to deploying a Go server on AWS EC2 with Nginx, systemd, a custom subdomain, and HTTPS. Covers the theory behind every step so you understand the why, not just the how."
+---
+
+## Mental Model: How It All Fits Together
+
+Before touching any command, internalize this core difference:
+
+```text
+React / Angular  →  Dead files (HTML, CSS, JS)  →  Nginx reads & sends them
+Go Server        →  Live process (running code) →  Nginx forwards requests to it
+```
+
+- **React** is like a PDF. It just sits on disk. Nginx picks it up and sends it to the browser. No process needed.
+- **Go** is like a chef in a kitchen. It's actively running, waiting for requests, doing real work on the server.
+
+```text
+EC2 SERVER
+───────────────────────────────────────────
+systemd   → starts and babysits the Go process
+Go        → runs on :8080, handles requests
+Nginx     → receives traffic on :80/:443, forwards to :8080
+```
+
+## Architecture
+
+```text
+User Browser
+      ↓
+go.yourdomain.com
+      ↓
+DNS A Record
+      ↓
+EC2 Public IP
+      ↓
+Nginx (port 80/443)
+      ↓
+Go Server (port 8080, internal only)
+```
+
+## 1. Write the Go App Locally
+
+### Install Go
+
+Download from [go.dev/dl](https://go.dev/dl) and verify:
+
+```bash
+go version
+# go version go1.23.0
+```
+
+### Create the project
+
+```bash
+mkdir my-go-server
+cd my-go-server
+go mod init my-go-server
+```
+
+`go mod init` creates `go.mod` — Go's equivalent of `package.json`. It tracks your project name and dependencies.
+
+### Write a basic server
+
+```go main.go
+package main
+
+import (
+    "fmt"
+    "net/http"
+    "log"
+)
+
+func homeHandler(w http.ResponseWriter, r *http.Request) {
+    fmt.Fprintln(w, "Hello from Go server!")
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+    fmt.Fprintln(w, "OK")
+}
+
+func main() {
+    http.HandleFunc("/", homeHandler)
+    http.HandleFunc("/health", healthHandler)
+    fmt.Println("Server starting on port 8080...")
+    log.Fatal(http.ListenAndServe(":8080", nil))
+}
+```
+
+**What each part does:**
+
+| Line | Purpose |
+| --- | --- |
+| `package main` | Marks this as an executable program, not a library |
+| `http.HandleFunc` | "When someone hits `/health`, run this function" |
+| `ListenAndServe` | Start the server, block forever |
+| `log.Fatal` | If server fails to start, print error and exit |
+
+### Test locally
+
+```bash
+go run main.go
+# Server starting on port 8080...
+```
+
+In another terminal:
+
+```bash
+curl http://localhost:8080
+# Hello from Go server!
+
+curl http://localhost:8080/health
+# OK
+```
+
+## 2. Launch EC2
+
+**Configuration:**
+
+- OS: **Ubuntu 24.04 LTS**
+- Instance type: `t3.micro`
+- Key pair: create new → download `mykey.pem`
+
+## 3. Configure security group
+
+**Inbound rules:**
+
+| Type | Port | Why |
+| --- | --- | --- |
+| SSH | 22 | Remote server access |
+| HTTP | 80 | Website traffic |
+| HTTPS | 443 | Secure traffic |
+
+<Warning>
+  Do **not** open port `8080`. Go runs internally. Nginx handles all outside traffic. Exposing `8080` bypasses your security layer.
+</Warning>
+
+## 4. Connect to EC2
+
+```bash
+chmod 400 mykey.pem           # fix key permissions (SSH requires this)
+ssh -i mykey.pem ubuntu@EC2_PUBLIC_IP
+```
+
+## 5. Update the server
+
+```bash
+sudo apt update && sudo apt upgrade -y
+```
+
+Always do this first — installs the latest security patches.
+
+## 6. Install Go on EC2
+
+```bash
+wget https://go.dev/dl/go1.23.0.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.23.0.linux-amd64.tar.gz
+```
+
+**What's happening:**
+
+```text
+wget           → download the Go installer
+tar            → extract it
+-C /usr/local  → extract into /usr/local directory
+```
+
+### Add Go to PATH
+
+```bash
+echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Linux doesn't know where the `go` command is until you tell it. `PATH` is a list of directories Linux searches when you type a command. This adds Go's location to that list.
+
+```bash
+go version
+# go version go1.23.0 linux/amd64
+```
+
+## 7. Get Your Code onto EC2
+
+<Tabs>
+  <Tab title="Git (recommended)">
+    ```bash
+    sudo apt install git -y
+    git clone https://github.com/youruser/my-go-server.git
+    cd my-go-server
+    ```
+  </Tab>
+  <Tab title="SCP (manual copy)">
+    From your local machine:
+
+    ```bash
+    scp -i mykey.pem -r ./my-go-server ubuntu@EC2_PUBLIC_IP:/home/ubuntu/
+    ```
+  </Tab>
+</Tabs>
+
+<Info>
+  **Why build on EC2, not locally?** Your Mac may have an ARM chip. EC2 runs x86. A binary built on the wrong CPU won't run. If you want to build locally, cross-compile:
+
+  ```bash
+  GOOS=linux GOARCH=amd64 go build -o server .
+  ```
+</Info>
+
+## 8. Build the binary
+
+```bash
+cd /home/ubuntu/my-go-server
+go mod tidy          # download any missing dependencies
+go build -o server . # compile everything into a binary named "server"
+```
+
+**What happens:**
+
+```text
+go mod tidy   → fetch missing packages
+go build      → compile all .go files
+-o server     → name the output "server"
+.             → build everything in current directory
+```
+
+Test it manually first:
+
+```bash
+./server
+# Server starting on port 8080...
+```
+
+In another SSH session:
+
+```bash
+curl http://localhost:8080
+# Hello from Go server!
+```
+
+Press `Ctrl+C` to stop it. We'll run it properly via systemd next.
+
+## 9. Keep it running with systemd
+
+### Why you can't just run `./server`
+
+When you run `./server` in your terminal, the process is **owned by your terminal session**:
+
+```text
+Your Terminal
+└── running ./server as a child process
+    └── Ctrl+C or closing SSH → server dies immediately
+```
+
+systemd solves this completely.
+
+### How systemd works
+
+On every Linux boot:
+
+```text
+Linux Kernel
+      ↓
+systemd starts (always PID 1, the grandfather of all processes)
+      ↓
+systemd starts everything: networking, SSH, Nginx, your Go app
+```
+
+When systemd starts your Go server, it owns the process — not your terminal. Your terminal has zero power over it.
+
+```text
+WITHOUT systemd            WITH systemd
+─────────────────          ─────────────────────────────
+Close SSH → dies           Close SSH → keeps running
+EC2 reboots → dead         EC2 reboots → auto-starts
+Crashes → stays dead       Crashes → restarts in 5 seconds
+You babysit it             systemd babysits it
+```
+
+### Create the service file
+
+```bash
+sudo nano /etc/systemd/system/goapp.service
+```
+
+```ini goapp.service
+[Unit]
+Description=Go Application Server
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/my-go-server
+ExecStart=/home/ubuntu/my-go-server/server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**What each line means:**
+
+| Section | Field | Purpose |
+| --- | --- | --- |
+| `[Unit]` | `Description` | Human-readable name, shows in logs |
+| `[Unit]` | `After=network.target` | Don't start until networking is ready |
+| `[Service]` | `User=ubuntu` | Run as `ubuntu`, not root (safer) |
+| `[Service]` | `WorkingDirectory` | Where to run from (so relative paths work) |
+| `[Service]` | `ExecStart` | The exact command to start your server |
+| `[Service]` | `Restart=always` | If it crashes, restart it |
+| `[Service]` | `RestartSec=5` | Wait 5 seconds before restarting |
+| `[Install]` | `WantedBy=multi-user.target` | Start this when Linux boots normally |
+
+### Enable and start
+
+```bash
+sudo systemctl daemon-reload   # tell systemd about the new service file
+sudo systemctl enable goapp    # start automatically on every boot
+sudo systemctl start goapp     # start right now
+sudo systemctl status goapp    # verify it's running
+```
+
+Expected output:
+
+```text
+● goapp.service - Go Application Server
+   Active: active (running) since ...
+```
+
+### Controlling the service
+
+| Command | When to use |
+| --- | --- |
+| `sudo systemctl stop goapp` | Take it offline |
+| `sudo systemctl start goapp` | Start after stopping |
+| `sudo systemctl restart goapp` | After code changes and rebuild |
+| `sudo systemctl status goapp` | Check if alive or dead |
+
+## 10. Nginx as Reverse Proxy
+
+### Why Nginx sits in front of Go
+
+You could expose Go directly on port 80, but you shouldn't:
+
+```text
+WITHOUT Nginx:
+Internet → port 8080 → Go directly exposed (dangerous)
+
+WITH Nginx:
+Internet → port 80/443 → Nginx → port 8080 → Go (internal only)
+```
+
+1. **Security** — Port 8080 stays closed. Attackers can't hit Go directly.
+2. **SSL termination** — Nginx handles HTTPS so Go doesn't need to.
+3. **Multiple apps on one server** — Nginx routes by domain name.
+4. **Compression, caching, rate limiting** — Nginx handles infrastructure; Go handles business logic.
+
+### How Nginx and Go actually connect
+
+Nginx doesn't know about your Go code or binary. They connect through **one thing only: a port number.**
+
+```text
+Nginx config:                   Your Go code:
+proxy_pass localhost:8080  ←→   ListenAndServe(":8080", nil)
+
+These two numbers must match. That's the only link.
+```
+
+Nginx essentially does this automatically for every request:
+
+```bash
+curl http://localhost:8080   # this is all Nginx does internally
+```
+
+### What happens if Go is down
+
+```text
+Browser → Nginx → tries localhost:8080 → nothing there → 502 Bad Gateway
+```
+
+`502` means: "Nginx is fine, but the thing it's proxying to is dead." This is why systemd is not optional.
+
+### Install Nginx
+
+```bash
+sudo apt install nginx -y
+sudo systemctl enable nginx
+sudo systemctl start nginx
+```
+
+### Configure Nginx for multiple apps (the right way)
+
+Never edit the `default` config if something is already running on it. Create a **separate file per app**:
+
+```text
+/etc/nginx/
+├── sites-available/        ← all configs (inactive drafts)
+│   ├── default             ← existing app, don't touch
+│   └── goapp               ← new file for Go
+└── sites-enabled/          ← symlinks to active configs
+    ├── default             ← currently active
+    └── goapp               ← we'll activate this
+```
+
+```bash
+sudo nano /etc/nginx/sites-available/goapp
+```
+
+```nginx
+server {
+    listen 80;
+    server_name go.yourdomain.com;
+
+    location / {
+        proxy_pass          http://localhost:8080;
+        proxy_http_version  1.1;
+        proxy_set_header    Host              $host;
+        proxy_set_header    X-Real-IP         $remote_addr;
+        proxy_set_header    X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header    X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+**Why each header:**
+
+| Header | Purpose |
+| --- | --- |
+| `proxy_pass` | Forward request to Go on port 8080 |
+| `Host` | Tell Go what domain was requested |
+| `X-Real-IP` | Tell Go the real user IP, not Nginx's IP |
+| `X-Forwarded-For` | Chain of IPs if behind multiple proxies |
+| `X-Forwarded-Proto` | Tell Go if original request was HTTP or HTTPS |
+
+**How Nginx routes by domain:**
+
+```text
+Request to go.yourdomain.com  → matches goapp config   → proxies to :8080
+Request to yourdomain.com     → matches default config → your existing app
+```
+
+### Activate the config
+
+```bash
+# Create symlink to enable it
+sudo ln -s /etc/nginx/sites-available/goapp /etc/nginx/sites-enabled/goapp
+
+# Test config (always do this before reloading)
+sudo nginx -t
+# syntax is ok
+
+# Reload without downtime (use reload, not restart, if traffic is live)
+sudo systemctl reload nginx
+```
+
+<Tip>
+  `reload` = swap config gracefully, zero downtime. `restart` = briefly stops Nginx (avoid on live traffic).
+</Tip>
+
+## 11. Domain \+ HTTPS
+
+### Add DNS A record
+
+In your DNS provider:
+
+| Type | Name | Value |
+| --- | --- | --- |
+| A | `go` | `EC2_PUBLIC_IP` |
+
+This creates `go.yourdomain.com → your EC2 IP`. Existing records are untouched.
+
+Verify after 1–5 minutes:
+
+```bash
+dig go.yourdomain.com
+# should show your EC2 IP
+```
+
+### Install SSL with Certbot
+
+```bash
+sudo apt install certbot python3-certbot-nginx -y
+sudo certbot --nginx -d go.yourdomain.com
+```
+
+Certbot automatically:
+
+1. Verifies you own the domain
+2. Generates the SSL certificate
+3. Updates only the `goapp` Nginx config for HTTPS
+4. Sets up auto-renewal
+
+Visit `https://go.yourdomain.com` — you should see the 🔒 padlock.
+
+### SSL auto-renewal
+
+Let's Encrypt certificates expire every 90 days. Certbot sets up a timer automatically.
+
+```bash
+sudo systemctl status certbot.timer   # check timer is active
+sudo certbot renew --dry-run          # test renewal works
+```
+
+## 12. Redeployment Workflow
+
+Every time you update your code:
+
+```bash
+cd /home/ubuntu/my-go-server
+git pull                        # get latest code
+go build -o server .            # rebuild binary
+sudo systemctl restart goapp    # restart service
+```
+
+Three commands. Done. The new binary is live.
+
+## 13. Monitoring and Debugging
+
+```bash
+# Live logs from your Go app
+sudo journalctl -u goapp -f
+
+# Check if Go is running
+sudo systemctl status goapp
+
+# Check what's listening on which ports
+ss -tulpn | grep LISTEN
+
+# Nginx logs
+sudo tail -f /var/log/nginx/access.log
+sudo tail -f /var/log/nginx/error.log
+
+# Test endpoints directly
+curl http://localhost:8080/health
+curl https://go.yourdomain.com/health
+```
+
+## Common Mistakes
+
+| Mistake | Why it's wrong | Fix |
+| --- | --- | --- |
+| Opening port 8080 to internet | Bypasses Nginx security | Keep 8080 closed, use Nginx |
+| Running `./server` in terminal | Dies when you disconnect | Use systemd |
+| Editing `default` when another app is on it | Breaks existing app | Create new file per app |
+| Not running `nginx -t` before reload | Bad config crashes Nginx | Always test first |
+| Building on Mac, uploading binary | Wrong CPU architecture | Build on EC2 or cross-compile |
+| Forgetting `source ~/.bashrc` | `go` command not found | Run it after editing `PATH` |
+| Using `restart` on live Nginx | Brief downtime | Use `reload` instead |
+
+## React vs Go Deployment: Full Comparison
+
+|  | React / Angular | Go Server |
+| --- | --- | --- |
+| What it is | Dead static files | Live running process |
+| Where logic runs | User's browser | Your EC2 server |
+| Nginx role | File server | Reverse proxy |
+| Process needed? | No | Yes (systemd) |
+| Can it crash? | No (files don't crash) | Yes (needs auto-restart) |
+| Redeploy means | Copy new files | Rebuild binary \+ restart service |
+| Port exposed publicly? | None (files on disk) | 8080 internally only |
+| 502 error possible? | No | Yes (if Go process is down) |
+
+## The Full Picture
+
+```text
+LOCAL MACHINE                     EC2 SERVER
+──────────────────                ──────────────────────────────────
+1. Write main.go
+2. go run (test locally)
+3. git push              →        4. git pull
+                                  5. go build -o server
+                                  6. systemd runs ./server → :8080
+                                  7. Nginx listens on :80/:443
+                                  8. Nginx proxy_pass → localhost:8080
+                                              ↓
+                                        INTERNET
+                                  https://go.yourdomain.com → Live
+```
+
+## One-Line Summaries
+
+<Note>
+  **systemd** is your Go app's babysitter. It keeps it alive forever.
+
+  **Nginx** is your Go app's receptionist. It takes calls and forwards them.
+
+  The only link between Nginx and Go is a **port number** (`:8080`).
+
+  `Ctrl+C` only kills processes your terminal owns. systemd-managed processes are owned by PID 1 and are untouchable from your terminal.
+</Note>
