@@ -62,7 +62,8 @@
                 "group": "Golang",
                 "icon": "golang",
                 "pages": [
-                  "frameworks/golang/golang-ec2-deployment"
+                  "frameworks/golang/golang-ec2-deployment",
+                  "frameworks/golang/github-actions-cicd"
                 ]
               }
             ]

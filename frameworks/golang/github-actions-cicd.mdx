@@ -1,0 +1,195 @@
+---
+title: "GitHub Actions CI/CD"
+sidebarTitle: "GitHub Actions CI/CD"
+description: "Automate Go server deployment to AWS EC2 + Nginx using GitHub Actions. Push to main and your server updates automatically."
+---
+
+Same architecture as the EC2 \+ Nginx guide, with three extra steps: GitHub Actions builds the binary, copies it over SSH, and restarts the service. Here's exactly what to do.
+
+## Step 1 — Add GitHub Secrets
+
+Repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+
+| Secret name | Value |
+| --- | --- |
+| `EC2_HOST` | Your EC2 public IP (just the IP, nothing else) |
+| `EC2_SSH_KEY` | Full contents of your `.pem` file |
+
+<Warning>
+  When pasting `EC2_SSH_KEY`, run `cat mykey.pem` and copy the entire output including the `-----BEGIN` and `-----END` lines. No extra spaces or missing newlines. The secret name in the workflow must match exactly — `EC2_SSH_KEY` not `EC2_SSH_key`.
+</Warning>
+
+## Step 2 — One-time EC2 setup
+
+SSH into your EC2 and run this once. It lets GitHub Actions restart the service without an interactive password prompt.
+
+```bash
+echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart goapp, \
+  /bin/systemctl start goapp, /bin/systemctl stop goapp, \
+  /bin/systemctl is-active goapp" \
+  | sudo tee /etc/sudoers.d/goapp-deploy
+
+# Verify syntax is valid (bad syntax here can lock you out of sudo)
+sudo visudo -cf /etc/sudoers.d/goapp-deploy
+```
+
+<Note>
+  GitHub Actions connects via SSH but can't type a password interactively. This grants sudo only for the specific `goapp` service commands — nothing broader.
+</Note>
+
+## Step 3 — Create the workflow file
+
+In your Go project root, create `.github/workflows/deploy.yml`:
+
+```yaml
+name: Build & Deploy Go Server
+
+on:
+  push:
+    branches: [main]      # triggers on every push to main
+  workflow_dispatch:       # allows manual trigger from GitHub UI
+
+jobs:
+  # ────────────────────────────────────────────
+  # JOB 1: Build & Test (runs on GitHub's servers)
+  # ────────────────────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Download dependencies
+        run: go mod tidy
+
+      - name: Run tests
+        run: go test ./...          # fails pipeline here if any test fails
+
+      - name: Cross-compile for Linux (amd64)
+        run: GOOS=linux GOARCH=amd64 go build -o server .
+
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-server-binary
+          path: server
+          retention-days: 7
+
+  # ────────────────────────────────────────────
+  # JOB 2: Deploy (only runs after build passes)
+  # ────────────────────────────────────────────
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build              # won't start if build job fails
+    steps:
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: go-server-binary
+
+      - name: Make binary executable
+        run: chmod +x server
+
+      - name: Copy binary to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: server
+          target: /home/ubuntu/go-deployment/
+
+      - name: Restart service on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            sudo systemctl restart goapp
+            sleep 3
+            sudo systemctl is-active --quiet goapp || exit 1
+            echo "✅ Deployment successful"
+
+      - name: Health check
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
+            if [ "$STATUS" != "200" ]; then
+              echo "❌ Health check failed (HTTP $STATUS)"
+              exit 1
+            fi
+            echo "✅ Health check passed"
+```
+
+<Warning>
+  Replace `go-deployment` in the `target` field with your actual project folder name on EC2. Also make sure your `goapp.service` file points to the same path: `ExecStart=/home/ubuntu/go-deployment/server`
+</Warning>
+
+## Step 4 — What happens on every push
+
+```text
+Push to main
+     ↓
+[Build — GitHub servers]
+  go mod tidy
+  go test ./...           ← fails here if tests break, EC2 never touched
+  go build (linux/amd64)
+     ↓
+[Deploy — only if build passed]
+  SCP binary → EC2
+  systemctl restart goapp
+  sleep 3 + is-active check
+  curl /health → must return 200
+```
+
+No `git pull`. No `go build` on EC2. The binary is built on GitHub's servers and copied over ready to run. EC2 doesn't need Go installed after initial setup.
+
+## Step 5 — Push and watch it run
+
+```bash
+git add .github/workflows/deploy.yml
+git commit -m "add Go CI/CD pipeline"
+git push origin main
+```
+
+Go to repo → **Actions** tab — you'll see it build and deploy live. Green checkmark = server updated automatically from now on.
+
+## Step 6 — The only difference vs React / Angular
+
+|  | React / Angular | Go Server |
+| --- | --- | --- |
+| Build output | Static files (`dist/`) | Single compiled binary |
+| Copy to EC2 | All dist files via SCP | One binary via SCP |
+| After deploy | Reload Nginx only | Restart systemd service |
+| Can it crash? | No (files don't crash) | Yes — health check catches it |
+| EC2 needs | Nginx only | Nginx \+ systemd |
+| Extra EC2 setup | None | Passwordless sudo for `systemctl` |
+
+## Rollback if something breaks
+
+```bash
+git revert HEAD
+git push origin main
+```
+
+GitHub Actions re-runs and redeploys the previous working binary automatically.
+
+## Common mistakes
+
+| Mistake | Fix |
+| --- | --- |
+| Pasting `.pem` with extra whitespace | Use `cat mykey.pem` and copy the full raw output |
+| `EC2_HOST` set to `ubuntu@IP` instead of just the IP | Secret should be the bare IP only |
+| Secret name typo (`EC2_SSH_key` vs `EC2_SSH_KEY`) | Secrets are case-sensitive — check exact name |
+| `target` path doesn't match `ExecStart` in service file | Both must point to the same folder |
+| Port 8080 open in EC2 security group | Keep it closed — Nginx handles all outside traffic |
